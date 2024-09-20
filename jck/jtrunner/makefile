@@ -132,12 +132,6 @@ else
 	VAR=$@
 endif
 
-ifeq ($(JDK_VERSION),19)
-	JCKFOREIGN_SOURCE=SymbolLookup
-else
-	JCKFOREIGN_SOURCE=Linker
-endif
-
 MKDIR=mkdir -p
 CLEANDIR=rm -rf
 CLEANFILE=rm -rf
@@ -146,7 +140,7 @@ COPYDIR=cp -r
 AND_IF_SUCCESSFUL=&&
 export AND_IF_SUCCESSFUL
 
-VPATH=$(SRCDIR)$(D)src$(D)share$(D)lib$(D)jni$(D):$(SRCDIR)$(D)src$(D)share$(D)lib$(D)atr$(D):$(SRCDIR)$(D)src$(D)share$(D)lib$(D)jvmti$(D):$(SRCDIR)$(D)tests$(D)api$(D)javax_management$(D)loading$(D)data$(D)archives$(D)src$(D)C$(D):$(SRCDIR)$(D)src:$(SRCDIR)$(D)tests$(D)api$(D)java_lang$(D)foreign$(D)$(JCKFOREIGN_SOURCE)
+VPATH=$(SRCDIR)$(D)src$(D)share$(D)lib$(D)jni$(D):$(SRCDIR)$(D)src$(D)share$(D)lib$(D)atr$(D):$(SRCDIR)$(D)src$(D)share$(D)lib$(D)jvmti$(D):$(SRCDIR)$(D)tests$(D)api$(D)javax_management$(D)loading$(D)data$(D)archives$(D)src$(D)C$(D):$(SRCDIR)$(D)src:$(SRCDIR)$(D)tests$(D)api$(D)java_lang$(D)foreign$(D)SymbolLookup:$(SRCDIR)$(D)tests$(D)api$(D)java_lang$(D)foreign$(D)Linker
 JMX_DATA_PATH=$(SRCDIR)$(D)tests$(D)api$(D)javax_management$(D)loading$(D)data
 JNI_INCLUDE_PATH=$(SRCDIR)$(D)src$(D)share$(D)lib$(D)jni$(D)include
 SOLARIS_PATH=$(JNI_INCLUDE_PATH)$(D)solaris
@@ -163,6 +157,19 @@ SRC_PATH=$(SRCDIR)/src
 CC=gcc
 CFLAGS=-fPIC -I$(SOLARIS_PATH) -I$(LINUX_PATH) -I$(SRC_PATH)
 LDFLAGS=-shared 
+
+# need to add c99 flags for p/zlinux as of JDK21
+ifeq ($(shell test $(JDK_VERSION) -ge 21; echo $$?),0)
+	ifeq ($(OS),linux)
+		ifeq ($(ARCH),ppc64le)
+			CFLAGS+=-std=gnu99
+		else ifeq ($(ARCH),s390x)
+			CFLAGS+=-std=gnu99
+		else ifeq ($(ARCH),x86_64)
+			CFLAGS+=-std=gnu99
+		endif
+	endif
+endif
 
 ifeq ($(OS),osx)
 	CC=gcc
@@ -235,16 +242,20 @@ ifeq ($(OS),win)
 	
 	JCKJNI=cd $(FULLOUTDIR) && $(LINK_CMD) $(LFLAGS)"$(FULLOUTDIR)$(D)$@" $(FULLOUTDIR)$(D)jckjni.obj
 	JCKJVMTI=cd $(FULLOUTDIR) && $(LINK_CMD) $(LFLAGS)"$(FULLOUTDIR)$(D)$@" $(FULLOUTDIR)$(D)jckjvmti.obj
-	JCKFOREIGN=cd $(FULLOUTDIR) && $(LINK_CMD) $(LFLAGS)"$(FULLOUTDIR)$(D)$@" $(FULLOUTDIR)$(D)$(JCKFOREIGN_SOURCE).obj
+	JCKFOREIGN=cd $(FULLOUTDIR) && $(LINK_CMD) $(LFLAGS)"$(FULLOUTDIR)$(D)$@" $(FULLOUTDIR)$(D)SymbolLookup.obj $(FULLOUTDIR)$(D)Linker.obj
 	SYSTEMINFOUSENATIVE=cd $(FULLOUTDIR) && $(LINK_CMD) $(LFLAGS)"$(FULLOUTDIR)$(D)$@" $(FULLOUTDIR)$(D)com_sun_management_mbeans_loading_SystemInfoUseNativeLib.obj
 	GETLIBIDFROMNATIVE=cd $(FULLOUTDIR) && $(LINK_CMD) $(LFLAGS)"$(FULLOUTDIR)$(D)$@" $(FULLOUTDIR)$(D)com_sun_management_mbeans_loading_GetLibIdFromNativeLib.obj
 	RANDOMGEN=cd $(FULLOUTDIR) && $(LINK_CMD) $(LFLAGS)"$(FULLOUTDIR)$(D)$@" $(FULLOUTDIR)$(D)com_sun_management_mbeans_loading_RandomGen.obj
 endif
 
-ifeq ($(shell test $(JDK_VERSION) -ge 19; echo $$?),0)
-	OBJS=$(LIBPREF)jckjni.$(LIBEXT) $(LIBPREF)jckjvmti.$(LIBEXT) $(LIBPREF)jckforeign.$(LIBEXT) $(LIBPREF)systemInfo.$(LIBEXT) $(LIBPREF)jmxlibid.$(LIBEXT) $(LIBPREF)genrandom.$(LIBEXT)
+ifeq ($(shell test $(JDK_VERSION) -ge 23; echo $$?),0)
+	OBJS=$(LIBPREF)jckjni.$(LIBEXT) $(LIBPREF)jckjvmti.$(LIBEXT) $(LIBPREF)jckforeign.$(LIBEXT)
 else
+  ifeq ($(shell test $(JDK_VERSION) -ge 19; echo $$?),0)
+	OBJS=$(LIBPREF)jckjni.$(LIBEXT) $(LIBPREF)jckjvmti.$(LIBEXT) $(LIBPREF)jckforeign.$(LIBEXT) $(LIBPREF)systemInfo.$(LIBEXT) $(LIBPREF)jmxlibid.$(LIBEXT) $(LIBPREF)genrandom.$(LIBEXT)
+  else
 	OBJS=$(LIBPREF)jckjni.$(LIBEXT) $(LIBPREF)jckjvmti.$(LIBEXT) $(LIBPREF)systemInfo.$(LIBEXT) $(LIBPREF)jmxlibid.$(LIBEXT) $(LIBPREF)genrandom.$(LIBEXT)
+  endif
 endif
 
 CFLAGS := $(CFLAGS) -I"$(SRCDIR)" -I"$(JNI_INCLUDE_PATH)" -I"$(JVMTI_INCLUDE_PATH)"
@@ -304,10 +315,11 @@ $(LIBPREF)jckjvmti.$(LIBEXT):jckjvmti.c
 	cd $(FULLOUTDIR) && $(CC) $(CFLAGS) $(LDFLAGS) $< $(OFLAG)$(FULLOUTDIR)$(VAR)
 	$(JCKJVMTI)
 
-$(LIBPREF)jckforeign.$(LIBEXT):$(JCKFOREIGN_SOURCE).c
-	cd $(FULLOUTDIR) && $(CC) $(CFLAGS) $(LDFLAGS) $< $(OFLAG)$(FULLOUTDIR)$(VAR)
+$(LIBPREF)jckforeign.$(LIBEXT):SymbolLookup.c Linker.c
+	cd $(FULLOUTDIR) && $(CC) $(CFLAGS) $(LDFLAGS) $^ $(OFLAG)$(FULLOUTDIR)$(VAR)
 	$(JCKFOREIGN)
 
+ifeq ($(shell test $(JDK_VERSION) -lt 23; echo $$?),0)
 $(LIBPREF)systemInfo.$(LIBEXT):com_sun_management_mbeans_loading_SystemInfoUseNativeLib.c
 	cd $(FULLOUTDIR) && $(CC) $(CFLAGS) $(LDFLAGS) $< $(OFLAG)$(VAR)
 	$(SYSTEMINFOUSENATIVE)
@@ -319,12 +331,14 @@ $(LIBPREF)jmxlibid.$(LIBEXT):com_sun_management_mbeans_loading_GetLibIdFromNativ
 $(LIBPREF)genrandom.$(LIBEXT):com_sun_management_mbeans_loading_RandomGen.c
 	cd $(FULLOUTDIR) && $(CC) $(CFLAGS) $(LDFLAGS) $< $(OFLAG)$(FULLOUTDIR)$(VAR)
 	$(RANDOMGEN)
+endif
 
 createdir:
 	$(CLEANDIR) $(FULLOUTDIR)
 	$(MKDIR) $(FULLOUTDIR)
 	
 installjmx:
+ifeq ($(shell test $(JDK_VERSION) -lt 23; echo $$?),0)
 ifneq ($(OS),win)
 	$(COPYDIR) $(SRCDIR)$(D)tests$(D)api$(D)javax_management$(D)loading$(D)data$(D)* $(FULLOUTDIR)$(D).
 	cd $(FULLOUTDIR) && $(JAR) uf $(FULLOUTDIR)/archives/MBeanUseNativeLib.jar $(LIBPREF)systemInfo.$(LIBEXT)
@@ -333,6 +347,9 @@ else
 	$(COPYDIR) "$(JMX_DATA_PATH)$(D)." "$(FULLOUTDIR)$(D)"
 	cd "$(FULLOUTDIR)" && $(JAR) uf "$(FULLOUTDIR)$(D)archives$(D)MBeanUseNativeLib.jar" $(LIBPREF)systemInfo.$(LIBEXT)
 	cd "$(FULLOUTDIR)" && $(JAR) cf "$(FULLOUTDIR)$(D)archives$(D)OnlyLibs.jar" $(LIBPREF)jmxlibid.$(LIBEXT)
+endif
+else
+	echo "JMX not required for jdk-23+"
 endif
 
 .PHONY clean:

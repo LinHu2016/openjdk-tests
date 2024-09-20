@@ -13,9 +13,12 @@
 # limitations under the License.
 #
 
-# script runs in 4 modes - build / run / load / clean
+# script runs in 5 modes - prepare / build / run / load / clean
 
 set -e
+
+source $(dirname "$0")/provider.sh
+
 tag=nightly
 docker_os=ubuntu
 build_type=full
@@ -27,27 +30,28 @@ test=derby
 testtarget=""
 platform="linux_x86-64"
 portable="false"
-job_name=""
-build_number=""
+docker_image_source_job_name=""
+build_number=$BUILD_NUMBER
 node_name=""
 node_labels=""
 node_label_micro_architecture=""
 node_label_current_os=""
-container_run="docker run"
-container_login="docker login"
-container_inspect="docker inspect"
-container_cp="docker cp"
-container_commit="docker commit"
-container_tag="docker tag"
-container_logout="docker logout"
-container_push="docker push"
-container_pull="docker pull"
-container_rm="docker rm"
-container_rmi="docker rmi"
-criu_combo_os_microarch_list=""
+container_run="$(getExternalImageCommand) run"
+container_login="$(getExternalImageCommand) login"
+container_inspect="$(getExternalImageCommand) inspect"
+container_cp="$(getExternalImageCommand) cp"
+container_commit="$(getExternalImageCommand) commit"
+container_tag="$(getExternalImageCommand) tag"
+container_logout="$(getExternalImageCommand) logout"
+container_push="$(getExternalImageCommand) push"
+container_pull="$(getExternalImageCommand) pull"
+container_rm="$(getExternalImageCommand) rm"
+container_rmi="$(getExternalImageCommand) rmi"
 docker_registry_required="false"
 docker_registry_url=""
 docker_registry_dir=""
+base_docker_registry_url="default"
+base_docker_registry_dir="default"
 reportdst="false"
 reportsrc="false"
 docker_args=""
@@ -57,10 +61,10 @@ imageArg=""
 
 
 usage () {
-	echo 'Usage : external.sh  --dir TESTDIR --tag DOCKERIMAGE_TAG --version JDK_VERSION --impl JDK_IMPL [--docker_os docker_os][--platform PLATFORM] [--portable portable] [--node_name node_name] [--node_labels node_labels] [--docker_registry_required docker_registry_required] [--docker_registry_url DOCKER_REGISTRY_URL] [--docker_registry_dir DOCKER_REGISTRY_DIR] [--criu_combo_os_microarch_list CRIU_XLINUX_COMBO_LIST] [--mount_jdk mount_jdk] [--test_root TEST_ROOT] [--reportsrc appReportDir] [--reportdst REPORTDIR] [--testtarget target] [--docker_args EXTRA_DOCKER_ARGS] [--build|--run|--load|--clean]'
+	echo 'Usage : external.sh  --dir TESTDIR --tag DOCKERIMAGE_TAG --version JDK_VERSION --impl JDK_IMPL [--docker_os docker_os][--platform PLATFORM] [--portable portable] [--node_name node_name] [--node_labels node_labels] [--docker_registry_required docker_registry_required] [--docker_registry_url DOCKER_REGISTRY_URL] [--docker_registry_dir DOCKER_REGISTRY_DIR] [--base_docker_registry_url baseDockerRegistryUrl] [--base_docker_registry_dir baseDockerRegistryDir] [--mount_jdk mount_jdk] [--test_root TEST_ROOT] [--reportsrc appReportDir] [--reportdst REPORTDIR] [--testtarget target] [--docker_args EXTRA_DOCKER_ARGS] [--build|--run|--load|--clean|--prune]'
 }
 
-supported_tests="external_custom aot camel criu-portable-checkpoint  criu-portable-restore criu-ubi-portable-checkpoint criu-ubi-portable-restore derby elasticsearch jacoco jenkins functional-test kafka lucene-solr openliberty-mp-tck payara-mp-tck quarkus quarkus_quickstarts scala system-test tomcat tomee wildfly wycheproof netty spring"
+supported_tests="external_custom aot camel criu-functional criu-portable-checkpoint  criu-portable-restore criu-ubi-portable-checkpoint criu-ubi-portable-restore derby elasticsearch jacoco jenkins functional-test kafka lucene-solr openliberty-mp-tck payara-mp-tck quarkus quarkus_quickstarts scala system-test tck-ubi-test tomcat tomee wildfly wycheproof netty spring"
 
 function check_test() {
     test=$1
@@ -79,7 +83,7 @@ parseCommandLineArgs() {
 	check_external_custom=0
 	while [[ $# -gt 0 ]] && [[ ."$1" = .-* ]] ; do
 		opt="$1";
-		shift; 
+		shift;
 
 		case "$opt" in
 			"--dir" | "-d" )
@@ -97,7 +101,7 @@ parseCommandLineArgs() {
 					docker_os=ubi
 				fi
 
-				if [[ "${test}" == *"criu"* ]]; then
+				if [[ "${test}" == *"criu"* || "${test}" == *"tck"* ]]; then
 					container_run="sudo podman run"
 					container_login="sudo podman login"
 					container_inspect="sudo podman inspect"
@@ -111,25 +115,28 @@ parseCommandLineArgs() {
 					container_rmi="sudo podman rmi"
 				fi
 				shift;;
-			
+
 			"--version" | "-v" )
 				version="$1"; shift;;
-			
+
 			"--impl" | "-i" )
 				impl="$1"; shift;;
 
 			"--docker_args" )
-				if [ -z ${1+x} ]; then 
-					echo "No EXTRA_DOCKER_ARGS set"; 
-				else 
+				if [ -z ${1+x} ]; then
+					echo "No EXTRA_DOCKER_ARGS set";
+				else
   					docker_args="$1"; shift;
   					parse_docker_args $docker_args;
 				fi;;
-				
+
+			"--docker_os" | "-dos" )
+				docker_os="$1"; shift;;
+
 			"--tag" | "-t" )
-				if [ -z "$1" ]; then 
-					echo "No DOCKERIMAGE_TAG set, tag as default 'nightly'"; 
-				else 
+				if [ -z "$1" ]; then
+					echo "No DOCKERIMAGE_TAG set, tag as default 'nightly'";
+				else
   					tag="$1";
 				fi
 				shift;
@@ -150,7 +157,7 @@ parseCommandLineArgs() {
 			"--node_labels" )
 				node_labels="$1"; shift;
 				for label in $node_labels
-				do 
+				do
 					if [[ -z "$node_label_micro_architecture" && "$label" == "hw.arch."*"."* ]]; then #hw.arch.x86.skylake
 						node_label_micro_architecture=$label
 						echo "node_label_micro_architecture is $node_label_micro_architecture"
@@ -172,14 +179,27 @@ parseCommandLineArgs() {
 				docker_registry_dir="$1"; shift;
 				docker_registry_dir=$(echo "$docker_registry_dir" | tr '[:upper:]' '[:lower:]')  # docker registry link must be lowercase
 				IFS=':' read -r -a dir_array <<< "$docker_registry_dir"
-				job_name=${dir_array[0]}
+				docker_image_source_job_name=${dir_array[0]}
 				build_number=${dir_array[1]};;
+
+			"--base_docker_registry_url" )
+				if [ -z "$1" ]; then 
+					base_docker_registry_url="default";
+				else 
+  					base_docker_registry_url="$1";
+				fi
+				shift;;
+
+			"--base_docker_registry_dir" )
+				if [ -z "$1" ]; then 
+					base_docker_registry_dir="default";
+				else 
+  					base_docker_registry_dir="$1";
+				fi
+				shift;;
 
 			"--criu_default_image_job_name" )
 				criu_default_image_job_name="$1"; shift;;
-
-			"--criu_combo_os_microarch_list" )
-				criu_combo_os_microarch_list="$1"; shift;;
 
 			"--test_root" )
 				test_root="$1"; shift;;
@@ -193,8 +213,11 @@ parseCommandLineArgs() {
 			"--testtarget" )
 				testtarget="$1"; shift;;
 
+			"--prepare" | "-p" )
+				command_type=prepare;;
+
 			"--build" | "-b" )
-				command_type=build;; 
+				command_type=build;;
 
 			"--run" | "-r" )
 				command_type=run;;
@@ -205,40 +228,43 @@ parseCommandLineArgs() {
 			"--clean" | "-c" )
 				command_type=clean;;
 
+			"--prune" | "-p" )
+				command_type=prune;;
+
 			"--help" | "-h" )
 				usage; exit 0;;
 
 			*) echo >&2 "Invalid option: ${opt}"; echo "This option was unrecognized."; usage; exit 1;
 		esac
-	done	
+	done
 }
 
 # Parse environment variable DOCKERIMAGE_TAG
 # to set docker_os, build_type, package
-function parse_tag() { 
+function parse_tag() {
 
 	# set PACKAGE
 	case $tag in
-   		*jre*) 
+   		*jre*)
     		package=jre
 		;;
 	esac
-	
+
 	# set DOCKER_OS
 	case $tag in
-		*ubuntu*|*latest*|*nightly*) 
+		*ubuntu*|*latest*|*nightly*)
 			echo "DOCKERIMAGE_TAG $tag has been recognized.";;
    		*) echo "Unable to recognize DOCKER_OS from DOCKERIMAGE_TAG = $tag!";;
 	esac
-	
+
 }
 
 function parse_docker_args() {
 # parse docker_args to two variable: mountV and  imageArg
-	mountV=""; 
+	mountV="";
 	while [[ $# -gt 0 ]] && [[ ."$1" = .-* ]] ; do
 		opt="$1";
-		shift; 
+		shift;
 
 		case "$opt" in
 			"--volume" | "-v" )
@@ -248,7 +274,7 @@ function parse_docker_args() {
 				mountV="${mountV} --tmpfs $1 ";
 				shift;;
 			"--image" | "-i" )
-				imageArg="$1"; 
+				imageArg="$1";
 				shift;;
 			*) echo >&2 "Invalid docker args option: ${opt}"; exit 1;
 		esac
@@ -262,12 +288,46 @@ function docker-ip() {
 
 parseCommandLineArgs "$@"
 
-# set DOCKER_HOST env variables 
+# set DOCKER_HOST env variables
 # DOCKER_HOST=$(docker-ip $test-test)
 
+if [ $command_type == "prepare" ]; then
+	# Specify docker.io or internal registry to prepare base image with login to increase pull limit or authenticate; Redhat Registry no login.
+	if [[ $base_docker_registry_url != "default" ]]; then
+		# Container credential check. 
+		# Temporarily host criu-ubi image with criu binary on internal/private hub.  In that case, provide USR/PSW for access 
+		if [[ "${test}" == *"criu-ubi"* && ! -z $DOCKER_REGISTRY_CREDENTIALS_USR ]]; then
+			BASE_DOCKER_REGISTRY_CREDENTIAL_USR=$DOCKER_REGISTRY_CREDENTIALS_USR
+			BASE_DOCKER_REGISTRY_CREDENTIAL_PSW=$DOCKER_REGISTRY_CREDENTIALS_PSW
+		fi
+		if [[ ! -z $BASE_DOCKER_REGISTRY_CREDENTIAL_USR ]]; then
+			echo "Base Docker Registry login starts to obtain Base Docker Image:"
+			echo $BASE_DOCKER_REGISTRY_CREDENTIAL_PSW | $container_login --username=$BASE_DOCKER_REGISTRY_CREDENTIAL_USR --password-stdin $base_docker_registry_url
+		else
+			echo "No credential available for container registry, will proceed without login..."
+		fi
+
+		if [[ $base_docker_registry_dir == "default" ]]; then
+			base_docker_image_name="eclipse-temurin:${JDK_VERSION}-jdk"
+			if [[ "${JDK_IMPL}" == *"openj9"* ]]; then
+				base_docker_image_name="ibm-semeru-runtimes:open-${JDK_VERSION}-jdk"
+			fi
+		else
+			base_docker_image_name="$base_docker_registry_dir:latest"
+		fi
+
+		echo "$container_pull $base_docker_registry_url/$base_docker_image_name"
+		$container_pull $base_docker_registry_url/$base_docker_image_name
+
+		if [[ ! -z $BASE_DOCKER_REGISTRY_CREDENTIAL_USR || ! -z $DOCKER_REGISTRY_CREDENTIALS_USR ]]; then
+			$container_logout $base_docker_registry_url
+		fi
+	fi
+fi
+
 if [ $command_type == "build" ]; then
-	echo "build_image.sh $test $version $impl $docker_os $package $build_type $platform $check_external_custom $imageArg"
-	source $(dirname "$0")/build_image.sh $test $version $impl $docker_os $package $build_type $platform $check_external_custom $imageArg
+	echo "build_image.sh $test $version $impl $docker_os $package $build_type $platform $base_docker_registry_dir $check_external_custom $imageArg"
+	source $(dirname "$0")/build_image.sh $test $version $impl $docker_os $package $build_type $platform "$base_docker_registry_dir" $check_external_custom $imageArg
 fi
 
 if [ $command_type == "run" ]; then
@@ -285,30 +345,20 @@ if [ $command_type == "run" ]; then
 		if [ $reportsrc != "false" ]; then
 			$container_cp $test-test:$reportsrc $reportdst/external_test_reports;
 		fi
-		
+
 		if [ $portable != "false" ]; then
 			if [[ $docker_registry_url ]]; then
 				echo "Private Docker Registry login starts:"
 				echo $DOCKER_REGISTRY_CREDENTIALS_PSW | $container_login --username=$DOCKER_REGISTRY_CREDENTIALS_USR --password-stdin $docker_registry_url
 
-				restore_ready_checkpoint_image_folder="${docker_registry_url}/${job_name}/${JDK_VERSION}-${JDK_IMPL}-${docker_os}-${platform}-${node_label_current_os}-${node_label_micro_architecture}"
+				restore_ready_checkpoint_image_folder="${docker_registry_url}/${docker_image_source_job_name}/${JDK_VERSION}-${JDK_IMPL}-${docker_os}-${platform}-${node_label_current_os}-${node_label_micro_architecture}"
 				tagged_restore_ready_checkpoint_image_num="${restore_ready_checkpoint_image_folder}:${build_number}"
-				tagged_restore_ready_checkpoint_image_latest="${restore_ready_checkpoint_image_folder}:latest"
 
 				# Push a docker image with build_num for records
 				echo "tagged_restore_ready_checkpoint_image_num is $tagged_restore_ready_checkpoint_image_num"
 				$container_commit --change='ENTRYPOINT ["/bin/bash", "/test_restore.sh"]' $test-test $tagged_restore_ready_checkpoint_image_num
 				echo "Pushing docker image ${tagged_restore_ready_checkpoint_image_num}"
 				$container_push $tagged_restore_ready_checkpoint_image_num
-
-				# Push another copy as the nightly default latest
-				echo "Change Tag from build_number to latest"
-				$container_tag $tagged_restore_ready_checkpoint_image_num $tagged_restore_ready_checkpoint_image_latest
-
-				if [[ "$job_name" == *"$criu_default_image_job_name"* ]]; then
-					echo "Pushing docker image ${tagged_restore_ready_checkpoint_image_latest} to docker registry"
-					$container_push $tagged_restore_ready_checkpoint_image_latest
-				fi
 				$container_logout $docker_registry_url
 			else
 				echo "Docker Registry is not available on this Jenkins"
@@ -330,7 +380,7 @@ if [ $command_type == "load" ]; then
 		if [[ $docker_registry_url ]]; then
 			echo "Private Docker Registry login starts:"
 			echo $DOCKER_REGISTRY_CREDENTIALS_PSW | $container_login --username=$DOCKER_REGISTRY_CREDENTIALS_USR --password-stdin $docker_registry_url
-			
+
 			mount_options="$mountV"
 			if [[ $mount_jdk == "false" ]]; then
 				echo "JDK inside the docker image is used for testing"
@@ -338,18 +388,27 @@ if [ $command_type == "load" ]; then
 			fi
 
 			restore_docker_image_name_list=()
-			if [ ! -z "${docker_registry_dir}" ]; then
-				echo "Testing image from specified DOCKER_REGISTRY_DIR"
-				restore_docker_image_name_list+=("${docker_registry_url}/${docker_registry_dir}")
+
+			if [[ $JOB_NAME == "Grinder" ]]; then
+			    echo "Testing image from docker_registry_dir"
+				restore_docker_image_name_list+=("${docker_registry_url}/$docker_image_source_job_name:${build_number}")
 			else
 				echo "Testing images from nightly builds"
-				image_os_micro_architecture_list=($criu_combo_os_microarch_list)
+				# - is shell metacharacter. In PLATFORM value, replace - with _
+				platValue=$(echo $PLATFORM | sed "s/-/_/")
+				comboList=CRIU_COMBO_LIST_$platValue
+				if [[ "$PLATFORM" =~ "linux_390-64" ]]; then
+					micro_architecture=$(echo $node_label_micro_architecture | sed "s/hw.arch.s390x.//")
+					comboList=$comboList_$micro_architecture
+				fi
+				image_os_micro_architecture_list="${!comboList}"
+				echo "${comboList}: ${image_os_micro_architecture_list}"
 				for image_os_micro_architecture in ${image_os_micro_architecture_list[@]}
 				do
-					restore_docker_image_name_list+=("${docker_registry_url}/$criu_default_image_job_name/${JDK_VERSION}-${JDK_IMPL}-${docker_os}-${platform}-${image_os_micro_architecture}:latest")
+					restore_docker_image_name_list+=("${docker_registry_url}/$docker_image_source_job_name/${JDK_VERSION}-${JDK_IMPL}-${docker_os}-${platform}-${image_os_micro_architecture}:${build_number}")
 				done
 			fi
-			
+
 			echo "The host machine OS is ${node_label_current_os}, and micro-architecture is ${node_label_micro_architecture}"
 			for restore_docker_image_name in ${restore_docker_image_name_list[@]}
 			do
@@ -359,18 +418,17 @@ if [ $command_type == "load" ]; then
 				echo "$container_run --privileged $mount_options --name restore-test --rm $restore_docker_image_name"
 				$container_run --privileged $mount_options --name restore-test --rm $restore_docker_image_name
 			done
-			
+
 			$container_logout $docker_registry_url
 		else
 			echo "Docker Registry is not available on this Jenkins"
 			exit 1
 		fi
 	else # no need private docker registry
-		docker_image_name="eclipse-temurin:${JDK_VERSION}-jdk"
+		docker_image_name="docker.io/library/eclipse-temurin:${JDK_VERSION}-jdk"
 		if [[ "${JDK_IMPL}" == *"openj9"* ]]; then
-			docker_image_name="ibm-semeru-runtimes:open-${JDK_VERSION}-jdk"
+			docker_image_name="docker.io/library/ibm-semeru-runtimes:open-${JDK_VERSION}-jdk"
 		fi
-		$container_pull $docker_image_name
 		test_script_path="$test_root/external/$test/test.sh"
 		chmod a+x $test_script_path
 		mount_test_script="-v $test_script_path:/test.sh"
@@ -384,12 +442,21 @@ if [ $command_type == "load" ]; then
 	fi
 fi
 
-if [ $command_type == "clean" ]; then
+if [ "${command_type}" == "clean" ] ; then
 	if [[ ${test} == 'external_custom' ]]; then
 			test="$(echo ${EXTERNAL_CUSTOM_REPO} | awk -F'/' '{print $NF}' | sed 's/.git//g')"
 	fi
+	if [ "${EXTERNAL_AQA_CONTAINER_CLEAN}" == "false" ] ; then
+			echo "to debug, put '-i --entrypoint /bin/bash' before container name"
+			container_rm="echo to clean, run manually: $container_rm"
+			container_rmi="echo to clean, run manually: $container_rmi"
+	fi
 	$container_rm -f $test-test; $container_rmi -f adoptopenjdk-$test-test:${JDK_VERSION}-$package-$docker_os-${JDK_IMPL}-$build_type
 	$container_rm -f restore-test
-	$container_rmi -f ${docker_registry_url}/${job_name}/${JDK_VERSION}-${JDK_IMPL}-${docker_os}-${platform}-${node_label_current_os}-${node_label_micro_architecture}:latest
-	$container_rmi -f ${docker_registry_url}/${criu_default_image_job_name}/${JDK_VERSION}-${JDK_IMPL}-${docker_os}-${platform}-${node_label_current_os}-${node_label_micro_architecture}:latest
+	$container_rmi -f ${docker_registry_url}/${docker_image_source_job_name}/${JDK_VERSION}-${JDK_IMPL}-${docker_os}-${platform}-${node_label_current_os}-${node_label_micro_architecture}:${build_number}
+	$container_rmi -f ${docker_registry_url}/${docker_image_source_job_name}:${build_number}
+fi
+
+if [ "${command_type}" == "prune" ] ; then
+	$(getExternalImageCommand) system prune --all --force
 fi

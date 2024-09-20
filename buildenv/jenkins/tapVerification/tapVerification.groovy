@@ -15,6 +15,7 @@ timestamps{
     // Set the AQA_TEST_PIPELINE Jenkins job displayName
     currentBuild.setDisplayName(PIPELINE_DISPLAY_NAME)
     node(LABEL) {
+        cleanWs disableDeferredWipeout: true, deleteDirs: true
         TIME_LIMIT =  params.TIME_LIMIT ? params.TIME_LIMIT.toInteger() : 1
         timeout(time: TIME_LIMIT, unit: 'HOURS') {
             // change openjdk-tests to aqa-tests
@@ -50,7 +51,9 @@ timestamps{
 
                             download_url = params.TOP_LEVEL_SDK_URL + "artifact/target/${os}/${arch}/${params.VARIANT}/AQAvitTaps/*zip*/AQAvitTaps.zip"
                             dir("${WORKSPACE}") {
-                                def aqaTapCmd = "${WORKSPACE}/aqaTap.sh -u ${download_url} -p ${PLATFORM}"
+                                env.PLATFORM = PLATFORM
+                                def PLATFORM_DIR = params.PLATFORM_DIR ? "${params.PLATFORM_DIR}" : "${PLATFORM}"
+                                def aqaTapCmd = "${WORKSPACE}/aqaTap.sh -u ${download_url} -p ${PLATFORM_DIR}"
                                 if (params.CUSTOMIZED_SDK_URL_CREDENTIAL_ID) {
                                     // USERNAME and PASSWORD reference with a withCredentials block will not be visible within job output
                                     withCredentials([usernamePassword(credentialsId: "${params.CUSTOMIZED_SDK_URL_CREDENTIAL_ID}", usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
